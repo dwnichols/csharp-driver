@@ -313,8 +313,7 @@ namespace Cassandra.Requests
                 Logger.Error("Session, Host and Connection must not be null");
                 return;
             }
-            var pool = ((Session)_session).GetExistingPool(_connection);
-            pool.CheckHealth(_connection);
+            ((Session)_session).CheckHealth(_connection);
             if (_session.Cluster.Configuration.QueryOptions.RetryOnTimeout || _request is PrepareRequest)
             {
                 if (_parent.HasCompleted())

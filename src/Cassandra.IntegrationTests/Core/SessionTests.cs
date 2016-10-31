@@ -276,8 +276,8 @@ namespace Cassandra.IntegrationTests.Core
                 Thread.Sleep(2000);
                 var pool11 = localSession1.GetOrCreateConnectionPool(hosts1[0], HostDistance.Local);
                 var pool12 = localSession1.GetOrCreateConnectionPool(hosts1[1], HostDistance.Local);
-                Assert.That(pool11.OpenConnections.Count(), Is.EqualTo(3));
-                Assert.That(pool12.OpenConnections.Count(), Is.EqualTo(3));
+                Assert.That(pool11.OpenConnections, Is.EqualTo(3));
+                Assert.That(pool12.OpenConnections, Is.EqualTo(3));
                 
                 localCluster2 = Cluster.Builder()
                     .AddContactPoint(TestCluster.InitialContactPoint)
@@ -294,8 +294,8 @@ namespace Cassandra.IntegrationTests.Core
                 Thread.Sleep(2000);
                 var pool21 = localSession2.GetOrCreateConnectionPool(hosts2[0], HostDistance.Local);
                 var pool22 = localSession2.GetOrCreateConnectionPool(hosts2[1], HostDistance.Local);
-                Assert.That(pool21.OpenConnections.Count(), Is.EqualTo(1));
-                Assert.That(pool22.OpenConnections.Count(), Is.EqualTo(1));
+                Assert.That(pool21.OpenConnections, Is.EqualTo(1));
+                Assert.That(pool22.OpenConnections, Is.EqualTo(1));
             }
             finally
             {

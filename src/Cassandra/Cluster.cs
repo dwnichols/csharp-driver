@@ -17,8 +17,10 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Threading;
+using Cassandra.Collections;
 using Cassandra.Serialization;
 using Cassandra.Tasks;
 using Microsoft.IO;
@@ -34,7 +36,7 @@ namespace Cassandra
         private static int _maxProtocolVersion = 4;
         // ReSharper disable once InconsistentNaming
         private static readonly Logger _logger = new Logger(typeof(Cluster));
-        private readonly ConcurrentBag<Session> _connectedSessions = new ConcurrentBag<Session>();
+        private readonly CopyOnWriteList<Session> _connectedSessions = new CopyOnWriteList<Session>();
         private ControlConnection _controlConnection;
         private volatile bool _initialized;
         private volatile Exception _initException;
@@ -231,6 +233,11 @@ namespace Cassandra
             return session;
         }
 
+        internal bool AnyOpenConnections(Host host)
+        {
+            return _connectedSessions.Any(session => session.HasConnections(host));
+        }
+
         public void Dispose()
         {
             Shutdown();
@@ -285,11 +292,11 @@ namespace Cassandra
             {
                 return;
             }
-            Session session;
-            while (_connectedSessions.TryTake(out session))
+            var sessions = _connectedSessions.ClearAndGet();
+            foreach (var s in sessions)
             {
-                session.WaitForAllPendingActions(timeoutMs);
-                session.Dispose();
+                s.WaitForAllPendingActions(timeoutMs);
+                s.Dispose();
             }
             _metadata.ShutDown(timeoutMs);
             _controlConnection.Dispose();

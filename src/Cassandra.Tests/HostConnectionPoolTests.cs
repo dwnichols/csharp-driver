@@ -50,7 +50,7 @@ namespace Cassandra.Tests
             return new Connection(new Serializer(ProtocolVersion), GetIpEndPoint(lastIpByte), config);
         }
 
-        private static Mock<HostConnectionPool2> GetPoolMock(Host host = null, Configuration config = null)
+        private static Mock<HostConnectionPool> GetPoolMock(Host host = null, Configuration config = null)
         {
             if (host == null)
             {
@@ -60,7 +60,7 @@ namespace Cassandra.Tests
             {
                 config = GetConfig();
             }
-            return new Mock<HostConnectionPool2>(host, config, new Serializer(ProtocolVersion));
+            return new Mock<HostConnectionPool>(host, config, new Serializer(ProtocolVersion));
         }
 
         private static Configuration GetConfig(int coreConnections = 3, int maxConnections = 8, IReconnectionPolicy rp = null)
@@ -103,7 +103,7 @@ namespace Cassandra.Tests
 
         public HostConnectionPoolTests()
         {
-            Diagnostics.CassandraTraceSwitch.Level = System.Diagnostics.TraceLevel.Info;
+            Diagnostics.CassandraTraceSwitch.Level = TraceLevel.Info;
         }
 
         [Test]
@@ -396,24 +396,24 @@ namespace Cassandra.Tests
                 GetConnectionMock(1)
             };
             var index = 1;
-            var c = HostConnectionPool2.MinInFlight(connections, ref index, 100);
+            var c = HostConnectionPool.MinInFlight(connections, ref index, 100);
             Assert.AreEqual(index, 2);
             Assert.AreSame(connections[2], c);
-            c = HostConnectionPool2.MinInFlight(connections, ref index, 100);
+            c = HostConnectionPool.MinInFlight(connections, ref index, 100);
             Assert.AreEqual(index, 3);
             //previous had less in flight
             Assert.AreSame(connections[2], c);
-            c = HostConnectionPool2.MinInFlight(connections, ref index, 100);
+            c = HostConnectionPool.MinInFlight(connections, ref index, 100);
             Assert.AreEqual(index, 4);
             Assert.AreSame(connections[4], c);
-            c = HostConnectionPool2.MinInFlight(connections, ref index, 100);
+            c = HostConnectionPool.MinInFlight(connections, ref index, 100);
             Assert.AreEqual(index, 5);
             Assert.AreSame(connections[0], c);
-            c = HostConnectionPool2.MinInFlight(connections, ref index, 100);
+            c = HostConnectionPool.MinInFlight(connections, ref index, 100);
             Assert.AreEqual(index, 6);
             Assert.AreSame(connections[0], c);
             index = 9;
-            c = HostConnectionPool2.MinInFlight(connections, ref index, 100);
+            c = HostConnectionPool.MinInFlight(connections, ref index, 100);
             Assert.AreEqual(index, 10);
             Assert.AreSame(connections[0], c);
         }
@@ -430,10 +430,10 @@ namespace Cassandra.Tests
                 GetConnectionMock(210)
             };
             var index = 1;
-            var c = HostConnectionPool2.MinInFlight(connections, ref index, 100);
+            var c = HostConnectionPool.MinInFlight(connections, ref index, 100);
             Assert.AreEqual(index, 2);
             Assert.AreSame(connections[1], c);
-            c = HostConnectionPool2.MinInFlight(connections, ref index, 100);
+            c = HostConnectionPool.MinInFlight(connections, ref index, 100);
             Assert.AreEqual(index, 3);
             // Should pick the first below the threshold
             Assert.AreSame(connections[0], c);
@@ -463,13 +463,37 @@ namespace Cassandra.Tests
             });
             var pool = mock.Object;
             var eventRaised = 0;
-            pool.AllConnectionClosed += _ => Interlocked.Increment(ref eventRaised);
+            pool.AllConnectionClosed += (_, __) => Interlocked.Increment(ref eventRaised);
             pool.ScheduleReconnection();
             Thread.Sleep(600);
             Assert.AreEqual(0, pool.OpenConnections);
             Assert.AreEqual(1, Volatile.Read(ref eventRaised));
             // Should not retry to reconnect, should relay on external consumer
             Assert.AreEqual(1, Volatile.Read(ref openConnectionsAttempts));
+        }
+
+        [Test]
+        public void ScheduleReconnection_Should_Not_Raise_AllConnectionClosed_When_Host_Is_Down()
+        {
+            var host = TestHelper.CreateHost("127.0.0.1");
+            host.SetDown();
+            var mock = GetPoolMock(host, GetConfig(1, 1, new ConstantReconnectionPolicy(100)));
+            var openConnectionsAttempts = 0;
+            mock.Setup(p => p.DoCreateAndOpen()).Returns(() =>
+            {
+                Interlocked.Increment(ref openConnectionsAttempts);
+                return TaskHelper.FromException<Connection>(new Exception("Test Exception"));
+            });
+            var pool = mock.Object;
+            var eventRaised = 0;
+            pool.AllConnectionClosed += (_, __) => Interlocked.Increment(ref eventRaised);
+            pool.ScheduleReconnection();
+            Thread.Sleep(600);
+            Assert.AreEqual(0, pool.OpenConnections);
+            Assert.AreEqual(0, Volatile.Read(ref eventRaised));
+            // Should continue to reconnect
+            Assert.Greater(Volatile.Read(ref openConnectionsAttempts), 1);
+            pool.Dispose();
         }
 
         [Test]
@@ -494,7 +518,7 @@ namespace Cassandra.Tests
             });
             var pool = mock.Object;
             var eventRaised = 0;
-            pool.AllConnectionClosed += _ => Interlocked.Increment(ref eventRaised);
+            pool.AllConnectionClosed += (_, __) => Interlocked.Increment(ref eventRaised);
             pool.SetDistance(HostDistance.Local);
             pool.ScheduleReconnection();
             Thread.Sleep(300);
@@ -506,6 +530,23 @@ namespace Cassandra.Tests
             Assert.AreEqual(3, pool.OpenConnections);
             Assert.AreEqual(0, Volatile.Read(ref eventRaised));
             Assert.AreEqual(6, Volatile.Read(ref openConnectionsAttempts));
+        }
+
+        [Test]
+        public async Task CheckHealth_Removes_Connection()
+        {
+            var mock = GetPoolMock();
+            mock.Setup(p => p.DoCreateAndOpen()).Returns(() => TaskHelper.ToTask(GetConnectionMock(0, int.MaxValue)));
+            var pool = mock.Object;
+            pool.SetDistance(HostDistance.Local);
+            Assert.AreEqual(0, pool.OpenConnections);
+            await pool.EnsureCreate();
+            // Wait for the pool to be created
+            await Task.Delay(100);
+            Assert.AreEqual(3, pool.OpenConnections);
+            var c = await pool.BorrowConnection();
+            pool.CheckHealth(c);
+            Assert.AreEqual(2, pool.OpenConnections);
         }
 
 
@@ -551,59 +592,6 @@ namespace Cassandra.Tests
         //            Assert.AreEqual(0, pool.OpenConnections.Count());
         //        }
         //
-        //        [Test]
-        //        public void OnHostCheckedAsDown_Should_Not_Schedule_Reconnection_When_Host_Is_Already_Reconnecting()
-        //        {
-        //            var host = TestHelper.CreateHost("127.0.0.1");
-        //            var config = GetConfig(2);
-        //            config.Timer = new HashedWheelTimer(100, 10);
-        //            var mock = GetPoolMock(host, config);
-        //            mock.Setup(p => p.CreateConnection()).Returns(() => TaskHelper.ToTask(CreateConnection()));
-        //            var pool = mock.Object;
-        //            Assert.AreEqual(0, pool.OpenConnections.Count());
-        //            //fake other pool getting the flag
-        //            host.SetAttemptingReconnection();
-        //            //attempt reconnection should exit
-        //            pool.OnHostCheckedAsDown(host, 10);
-        //            Thread.Sleep(400);
-        //            //Pool remains the same
-        //            Assert.AreEqual(0, pool.OpenConnections.Count());
-        //            config.Timer.Dispose();
-        //        }
-        //
-        //        [Test]
-        //        public void OnHostCheckedAsDown_Should_Schedule_Reconnection()
-        //        {
-        //            var host = TestHelper.CreateHost("127.0.0.1");
-        //            var config = GetConfig(2);
-        //            config.Timer = new HashedWheelTimer(100, 10);
-        //            var mock = GetPoolMock(host, config);
-        //            mock.Setup(p => p.CreateConnection()).Returns(() => TaskHelper.ToTask(CreateConnection()));
-        //            var pool = mock.Object;
-        //            Assert.AreEqual(0, pool.OpenConnections.Count());
-        //            //attempt reconnection should exit
-        //            pool.OnHostCheckedAsDown(host, 10);
-        //            Thread.Sleep(400);
-        //            //Pool should grow
-        //            Assert.AreEqual(1, pool.OpenConnections.Count());
-        //            config.Timer.Dispose();
-        //        }
-        //
-        //        [Test]
-        //        public void CheckHealth_Removes_Connection()
-        //        {
-        //            var host = TestHelper.CreateHost("127.0.0.1");
-        //            var connection1 = GetConnectionMock(100, SocketOptions.DefaultDefunctReadTimeoutThreshold + 10);
-        //            var mock = GetPoolMock(host, connection1.Configuration);
-        //            mock.Setup(p => p.CreateConnection()).Returns(() => TaskHelper.ToTask(connection1));
-        //            var pool = mock.Object;
-        //            pool.MaybeCreateFirstConnection().Wait();
-        //            Assert.AreEqual(1, pool.OpenConnections.Count());
-        //            var c = pool.OpenConnections.FirstOrDefault();
-        //            Assert.NotNull(c);
-        //            pool.CheckHealth(c);
-        //            Assert.AreEqual(0, pool.OpenConnections.Count());
-        //        }
     }
 }
 #endif

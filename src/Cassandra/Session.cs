@@ -35,13 +35,14 @@ namespace Cassandra
         private readonly Serializer _serializer;
         private static readonly Logger Logger = new Logger(typeof(Session));
         private readonly ConcurrentDictionary<IPEndPoint, HostConnectionPool> _connectionPool;
+        private readonly Cluster _cluster;
         private long _disposed;
         private volatile string _keyspace;
 
         public int BinaryProtocolVersion { get { return _serializer.ProtocolVersion; } }
 
         /// <inheritdoc />
-        public ICluster Cluster { get; private set; }
+        public ICluster Cluster { get { return _cluster; } }
 
         /// <summary>
         /// Gets the cluster configuration
@@ -70,10 +71,10 @@ namespace Cassandra
 
         public Policies Policies { get { return Configuration.Policies; } }
 
-        internal Session(ICluster cluster, Configuration configuration, string keyspace, Serializer serializer)
+        internal Session(Cluster cluster, Configuration configuration, string keyspace, Serializer serializer)
         {
             _serializer = serializer;
-            Cluster = cluster;
+            _cluster = cluster;
             Configuration = configuration;
             Keyspace = keyspace;
             UserDefinedTypes = new UdtMappingDefinitions(this, serializer);
@@ -225,31 +226,44 @@ namespace Cassandra
         }
 
         /// <summary>
-        /// Gets a list of all opened connections to all hosts
-        /// </summary>
-        private List<Connection> GetAllConnections()
-        {
-            var hosts = Cluster.AllHosts();
-            var connections = new List<Connection>();
-            foreach (var host in hosts)
-            {
-                HostConnectionPool pool;
-                if (_connectionPool.TryGetValue(host.Address, out pool))
-                {
-                    connections.AddRange(pool.OpenConnections);
-                }
-            }
-            return connections;
-        }
-
-        /// <summary>
         /// Gets or creates the connection pool for a given host
         /// </summary>
         internal HostConnectionPool GetOrCreateConnectionPool(Host host, HostDistance distance)
         {
-            var hostPool = _connectionPool.GetOrAdd(host.Address, address => 
-                new HostConnectionPool(host, distance, Configuration, _serializer));
+            var hostPool = _connectionPool.GetOrAdd(host.Address, address =>
+            {
+                var newPool = new HostConnectionPool(host, Configuration, _serializer);
+                newPool.AllConnectionClosed += OnAllConnectionClosed;
+                return newPool;
+            });
+            hostPool.SetDistance(distance);
             return hostPool;
+        }
+
+        internal void OnAllConnectionClosed(Host host, HostConnectionPool pool)
+        {
+            if (_cluster.AnyOpenConnections(host))
+            {
+                pool.ScheduleReconnection();
+                return;
+            }
+            // There isn't any open connection to this host in any of the pools
+            // By setting the host as down, all pools should cancel any outstanding reconnection attempt
+            if (host.SetDown())
+            {
+                // Only attempt reconnection with 1 connection pool
+                pool.ScheduleReconnection();
+            }
+        }
+
+        internal bool HasConnections(Host host)
+        {
+            HostConnectionPool pool;
+            if (_connectionPool.TryGetValue(host.Address, out pool))
+            {
+                return pool.HasConnections;
+            }
+            return false;
         }
 
         /// <summary>
@@ -260,6 +274,17 @@ namespace Cassandra
             HostConnectionPool pool;
             _connectionPool.TryGetValue(connection.Address, out pool);
             return pool;
+        }
+
+        internal void CheckHealth(Connection connection)
+        {
+            HostConnectionPool pool;
+            if (!_connectionPool.TryGetValue(connection.Address, out pool))
+            {
+                Logger.Error("Internal error: No host connection pool found");
+                return;
+            }
+            pool.CheckHealth(connection);
         }
 
         public PreparedStatement Prepare(string cqlQuery)
@@ -356,16 +381,18 @@ namespace Cassandra
                 //Do not honor that setting as it is best to cancel pending requests than waiting forever
                 timeout = Configuration.ClientOptions.QueryAbortTimeout;
             }
-            var connections = GetAllConnections();
-            if (connections.Count == 0)
-            {
-                return true;
-            }
-            Logger.Info("Waiting for pending operations of " + connections.Count + " connections to complete.");
-            var handles = connections.Select(c => c.WaitPending()).ToArray();
-            //WaitHandle.WaitAll() not supported on STAThreads (thanks COM!)
-            //Start new task and wait on the individual Task
-            return Task.Factory.StartNew(() => WaitHandle.WaitAll(handles, timeout)).Wait(timeout);
+            //TODO!
+            throw new NotImplementedException();
+//            var connections = GetAllConnections();
+//            if (connections.Count == 0)
+//            {
+//                return true;
+//            }
+//            Logger.Info("Waiting for pending operations of " + connections.Count + " connections to complete.");
+//            var handles = connections.Select(c => c.WaitPending()).ToArray();
+//            //WaitHandle.WaitAll() not supported on STAThreads (thanks COM!)
+//            //Start new task and wait on the individual Task
+//            return Task.Factory.StartNew(() => WaitHandle.WaitAll(handles, timeout)).Wait(timeout);
         }
     }
 }

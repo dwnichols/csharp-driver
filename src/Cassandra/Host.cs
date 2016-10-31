@@ -39,6 +39,7 @@ namespace Cassandra
         /// Event that gets raised when the host is set as DOWN (not available) by the driver, after being UP.
         /// It provides the delay for the next reconnection attempt.
         /// </summary>
+        //TODO: Change signature
         internal event Action<Host, long> Down;
         /// <summary>
         /// Event that gets raised when the host is considered as DOWN by the driver after checking: 

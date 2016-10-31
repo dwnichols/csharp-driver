@@ -273,9 +273,9 @@ namespace Cassandra.IntegrationTests.Core
                 Trace.TraceInformation("Waiting for few more seconds");
                 Thread.Sleep(6000);
                 var pool1 = session1.GetOrCreateConnectionPool(host1, HostDistance.Local);
-                Assert.AreEqual(2, pool1.OpenConnections.Count());
+                Assert.AreEqual(2, pool1.OpenConnections);
                 var pool2 = session1.GetOrCreateConnectionPool(host2, HostDistance.Local);
-                Assert.AreEqual(2, pool2.OpenConnections.Count());
+                Assert.AreEqual(2, pool2.OpenConnections);
             }
         }
     }

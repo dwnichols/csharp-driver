@@ -36,7 +36,7 @@ namespace Cassandra
         private static readonly Logger Logger = new Logger(typeof(Session));
         private readonly ConcurrentDictionary<IPEndPoint, HostConnectionPool> _connectionPool;
         private readonly Cluster _cluster;
-        private long _disposed;
+        private int _disposed;
         private volatile string _keyspace;
 
         public int BinaryProtocolVersion { get { return _serializer.ProtocolVersion; } }
@@ -54,7 +54,7 @@ namespace Cassandra
         /// </summary>
         public bool IsDisposed
         {
-            get { return Interlocked.Read(ref _disposed) > 0; }
+            get { return Volatile.Read(ref _disposed) > 0; }
         }
 
         /// <summary>
@@ -248,6 +248,11 @@ namespace Cassandra
                 return;
             }
             // There isn't any open connection to this host in any of the pools
+            MarkAsDownAndScheduleReconnection(host, pool);
+        }
+
+        internal void MarkAsDownAndScheduleReconnection(Host host, HostConnectionPool pool)
+        {
             // By setting the host as down, all pools should cancel any outstanding reconnection attempt
             if (host.SetDown())
             {

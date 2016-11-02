@@ -304,5 +304,16 @@ namespace Cassandra
             Configuration.Policies.SpeculativeExecutionPolicy.Dispose();
             _logger.Info("Cluster [" + _metadata.ClusterName + "] has been shut down.");
         }
+
+        /// <summary>
+        /// Helper method to retrieve the distance from LoadBalancingPolicy and set it at Host level.
+        /// Once ProfileManager is implemented, this logic will be part of it.
+        /// </summary>
+        internal static HostDistance RetrieveDistance(Host host, ILoadBalancingPolicy lbp)
+        {
+            var distance = lbp.Distance(host);
+            host.SetDistance(distance);
+            return distance;
+        }
     }
 }

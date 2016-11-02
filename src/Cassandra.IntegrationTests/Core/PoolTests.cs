@@ -328,7 +328,7 @@ namespace Cassandra.IntegrationTests.Core
                 .WithReconnectionPolicy(new ConstantReconnectionPolicy(reconnectionDelay))
                 .Build();
             var connectionAttempts = 0;
-            cluster.Metadata.Hosts.Down += (h, s) =>
+            cluster.Metadata.Hosts.Down += h =>
             {
                 //Every time there is a connection attempt, it is marked as down
                 connectionAttempts++;

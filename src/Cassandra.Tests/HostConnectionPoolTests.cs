@@ -549,6 +549,43 @@ namespace Cassandra.Tests
             Assert.AreEqual(2, pool.OpenConnections);
         }
 
+        [Test]
+        public async Task Pool_Increasing_Size_And_Closing_Should_Not_Leave_Connections_Open([Range(0, 30)] int delay)
+        {
+            var mock = GetPoolMock(null, GetConfig(50, 50));
+            mock.Setup(p => p.DoCreateAndOpen()).Returns(() =>
+                Task.Factory.StartNew(() => CreateConnection(), TaskCreationOptions.LongRunning));
+            var pool = mock.Object;
+            Assert.AreEqual(0, pool.OpenConnections);
+            pool.SetDistance(HostDistance.Local);
+            await pool.EnsureCreate();
+            Assert.Greater(pool.OpenConnections, 0);
+            // Wait for the pool to be gaining size
+            await Task.Delay(delay);
+            Trace.TraceInformation("!!!!!!!!!!!!!!!!!!!!!!!!!!Length {0}", pool.OpenConnections);
+            Assert.Greater(pool.OpenConnections, 1);
+            pool.Dispose();
+            await Task.Delay(20);
+            Assert.AreEqual(0, pool.OpenConnections);
+        }
+
+        [Test]
+        public async Task Dispose_Should_Not_Raise_AllConnections_Closed()
+        {
+            var mock = GetPoolMock(null, GetConfig(4, 4));
+            mock.Setup(p => p.DoCreateAndOpen()).Returns(() => TaskHelper.ToTask(CreateConnection()));
+            var pool = mock.Object;
+            Assert.AreEqual(0, pool.OpenConnections);
+            pool.SetDistance(HostDistance.Local);
+            var eventRaised = 0;
+            pool.AllConnectionClosed += (_, __) => Interlocked.Increment(ref eventRaised);
+            await pool.EnsureCreate();
+            Assert.Greater(pool.OpenConnections, 0);
+            pool.Dispose();
+            await Task.Delay(20);
+            Assert.AreEqual(0, Volatile.Read(ref eventRaised));
+        }
+
 
         //        [Test]
         //        public void AttemptReconnection_Should_Not_Create_A_New_Connection_If_There_Is_An_Open_Connection()

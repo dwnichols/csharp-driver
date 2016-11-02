@@ -149,8 +149,8 @@ namespace Cassandra
             Logger.Warning("Connection to {0} considered as unhealthy after {1} timed out operations", 
                 _host.Address, timedOutOps);
             //Defunct: close it and remove it from the pool
-            c.Dispose();
             OnConnectionClosing(c);
+            c.Dispose();
         }
 
         public void ConsiderResizingPool(int inFlight)
@@ -188,9 +188,19 @@ namespace Cassandra
         /// </summary>
         public void Dispose()
         {
-            // Mark as shuttingDown (once?)
-            //TODO:  Shutdown();
-            //TODO: close pool
+            var markShuttingDown = 
+                (Interlocked.CompareExchange(ref _state, PoolState.ShuttingDown, PoolState.Init) == PoolState.Init) ||
+                (Interlocked.CompareExchange(ref _state, PoolState.ShuttingDown, PoolState.Closing) == PoolState.Init);
+            if (!markShuttingDown)
+            {
+                // The pool is already being shutdown, never mind
+                return;
+            }
+            var connections = _connections.ClearAndGet();
+            foreach (var c in connections)
+            {
+                c.Dispose();
+            }
             _host.Up -= OnHostUp;
             _host.Down -= OnHostDown;
             _host.Remove -= OnHostRemoved;
@@ -200,6 +210,7 @@ namespace Cassandra
                 t.Cancel();
             }
             CancelNewConnectionTimeout();
+            Interlocked.Exchange(ref _state, PoolState.Shutdown);
         }
 
         public virtual async Task<Connection> DoCreateAndOpen()
@@ -216,9 +227,9 @@ namespace Cassandra
             }
             if (_config.GetPoolingOptions(_serializer.ProtocolVersion).GetHeartBeatInterval() > 0)
             {
-                c.OnIdleRequestException += OnIdleRequestException;
+                c.OnIdleRequestException += ex => OnIdleRequestException(c, ex);
             }
-            c.Closing += c1 => OnConnectionClosing(c1);
+            c.Closing += OnConnectionClosing;
             return c;
         }
 
@@ -327,7 +338,7 @@ namespace Cassandra
             ScheduleReconnection(true);
         }
 
-        private void OnHostDown(Host h, long delay)
+        private void OnHostDown(Host h)
         {
             // Cancel the outstanding timeout (if any)
             // If the timeout already elapsed, a connection could be been created anyway
@@ -337,9 +348,12 @@ namespace Cassandra
         /// <summary>
         /// Handler that gets invoked when if there is a socket exception when making a heartbeat/idle request
         /// </summary>
-        private void OnIdleRequestException(Exception ex)
+        private void OnIdleRequestException(Connection c, Exception ex)
         {
-            //TODO: Remove connection from pool and dispose it
+            Logger.Warning("Connection to {0} considered as unhealthy after idle timeout exception: {1}",
+                _host.Address, ex);
+            OnConnectionClosing(c);
+            c.Dispose();
         }
 
         /// <summary>
@@ -379,7 +393,9 @@ namespace Cassandra
             if (schedule != null)
             {
                 // Schedule the creation
-                timeout = _timer.NewTimeout(_ => StartCreatingConnection(schedule), null, schedule.NextDelayMs());
+                var delay = schedule.NextDelayMs();
+                Logger.Info("Scheduling reconnection to {0} in {1}ms", _host.Address, delay);
+                timeout = _timer.NewTimeout(_ => StartCreatingConnection(schedule), null, delay);
             }
             CancelNewConnectionTimeout(timeout);
             if (schedule == null)
@@ -442,7 +458,7 @@ namespace Cassandra
         /// <exception cref="SocketException">Throws a SocketException when the connection could not be established with the host</exception>
         /// <exception cref="AuthenticationException" />
         /// <exception cref="UnsupportedProtocolVersionException"></exception>
-        public async Task<Connection> CreateOpenConnection()
+        private async Task<Connection> CreateOpenConnection()
         {
             var concurrentOpenTcs = Volatile.Read(ref _connectionOpenTcs);
             // Try to exit early (cheap) as there could be another thread creating / finishing creating
@@ -498,6 +514,16 @@ namespace Cassandra
             var newLength = _connections.AddNew(c);
             Logger.Info("Connection to {0} opened successfully, pool #{1} length: {2}", 
                 _host.Address, GetHashCode(), newLength);
+            if (IsClosing)
+            {
+                // We haven't use a CAS operation, so it's possible that the pool is being closed while adding a new
+                // connection, we should remove it.
+                Logger.Info("Connection to {0} opened successfully and added to the pool #{1} but it was being closed",
+                    _host.Address);
+                _connections.Remove(c);
+                c.Dispose();
+                return await FinishOpen(tcs, GetNotConnectedException()).ConfigureAwait(false);
+            }
             return await FinishOpen(tcs, null, c).ConfigureAwait(false);
         }
 

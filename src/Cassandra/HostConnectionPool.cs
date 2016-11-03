@@ -77,6 +77,7 @@ namespace Cassandra
         private volatile int _maxInflightThreshold;
         private volatile int _maxConnectionLength;
         private volatile HashedWheelTimer.ITimeout _resizingEndTimeout;
+        private volatile bool _canCreateForeground = true;
         private int _poolResizing;
         private int _state = PoolState.Init;
         private HashedWheelTimer.ITimeout _newConnectionTimeout;
@@ -180,7 +181,8 @@ namespace Cassandra
             Logger.Info("Increasing pool #{0} size to {1}, as in-flight requests are above threshold ({2})", 
                 GetHashCode(), _expectedConnectionLength, _maxInflightThreshold);
             StartCreatingConnection(null);
-            _resizingEndTimeout = _timer.NewTimeout(_ => Interlocked.Exchange(ref _poolResizing, 0), null, BetweenResizeDelay);
+            _resizingEndTimeout = _timer.NewTimeout(_ => Interlocked.Exchange(ref _poolResizing, 0), null, 
+                BetweenResizeDelay);
         }
 
         /// <summary>
@@ -190,12 +192,14 @@ namespace Cassandra
         {
             var markShuttingDown = 
                 (Interlocked.CompareExchange(ref _state, PoolState.ShuttingDown, PoolState.Init) == PoolState.Init) ||
-                (Interlocked.CompareExchange(ref _state, PoolState.ShuttingDown, PoolState.Closing) == PoolState.Init);
+                (Interlocked.CompareExchange(ref _state, PoolState.ShuttingDown, PoolState.Closing) ==
+                    PoolState.Closing);
             if (!markShuttingDown)
             {
                 // The pool is already being shutdown, never mind
                 return;
             }
+            Logger.Info("Disposing connection pool #{0} to {1}", GetHashCode(), _host.Address);
             var connections = _connections.ClearAndGet();
             foreach (var c in connections)
             {
@@ -329,12 +333,15 @@ namespace Cassandra
 
         public void OnHostUp(Host h)
         {
+            // It can be awaited upon pool creation
+            _canCreateForeground = true;
             if (_connections.Count > 0)
             {
                 // This was the pool that was reconnecting, the pool is already getting the appropriate size
                 return;
             }
             Logger.Info("Pool #{0} for host {1} attempting to reconnect as host is UP", GetHashCode(), _host.Address);
+            // Schedule an immediate reconnection
             ScheduleReconnection(true);
         }
 
@@ -422,7 +429,7 @@ namespace Cassandra
                 // There's another reconnection schedule, leave it
                 return;
             }
-            CreateOpenConnection().ContinueWith(t =>
+            CreateOpenConnection(false).ContinueWith(t =>
             {
                 if (t.Status == TaskStatus.RanToCompletion)
                 {
@@ -457,8 +464,8 @@ namespace Cassandra
         /// </summary>
         /// <exception cref="SocketException">Throws a SocketException when the connection could not be established with the host</exception>
         /// <exception cref="AuthenticationException" />
-        /// <exception cref="UnsupportedProtocolVersionException"></exception>
-        private async Task<Connection> CreateOpenConnection()
+        /// <exception cref="UnsupportedProtocolVersionException" />
+        private async Task<Connection> CreateOpenConnection(bool foreground)
         {
             var concurrentOpenTcs = Volatile.Read(ref _connectionOpenTcs);
             // Try to exit early (cheap) as there could be another thread creating / finishing creating
@@ -488,6 +495,18 @@ namespace Cassandra
                 if (connectionsSnapshot.Length == 0)
                 {
                     // Avoid race condition while removing
+                    return await FinishOpen(tcs, GetNotConnectedException()).ConfigureAwait(false);
+                }
+                return await FinishOpen(tcs, null, connectionsSnapshot[0]).ConfigureAwait(false);
+            }
+            if (foreground && !_canCreateForeground)
+            {
+                // Foreground creation only cares about one connection
+                // If its already there, yield it
+                connectionsSnapshot = _connections.GetSnapshot();
+                if (connectionsSnapshot.Length == 0)
+                {
+                    // When creating in foreground, it failed
                     return await FinishOpen(tcs, GetNotConnectedException()).ConfigureAwait(false);
                 }
                 return await FinishOpen(tcs, null, connectionsSnapshot[0]).ConfigureAwait(false);
@@ -529,6 +548,7 @@ namespace Cassandra
 
         private Task<Connection> FinishOpen(TaskCompletionSource<Connection> tcs, Exception ex, Connection c = null)
         {
+            _canCreateForeground = false;
             Interlocked.Exchange(ref _connectionOpenTcs, null);
             if (ex != null)
             {
@@ -549,6 +569,10 @@ namespace Cassandra
         /// <summary>
         /// Ensures that the pool has at least contains 1 connection to the host.
         /// </summary>
+        /// <returns>An Array of connections with 1 or more elements or throws an exception.</returns>
+        /// <exception cref="SocketException" />
+        /// <exception cref="AuthenticationException" />
+        /// <exception cref="UnsupportedProtocolVersionException" />
         public async Task<Connection[]> EnsureCreate()
         {
             var connections = _connections.GetSnapshot();
@@ -557,17 +581,37 @@ namespace Cassandra
                 // Use snapshot to return as early as possible
                 return connections;
             }
+            if (IsClosing || !_host.IsUp)
+            {
+                // Should have not been considered as UP
+                throw GetNotConnectedException();
+            }
+            if (!_canCreateForeground)
+            {
+                // Take a new snapshot
+                connections = _connections.GetSnapshot();
+                if (connections.Length > 0)
+                {
+                    return connections;
+                }
+                // It's not considered as connected
+                throw GetNotConnectedException();
+            }
+            Connection c;
             try
             {
-                var c = await CreateOpenConnection().ConfigureAwait(false);
-                StartCreatingConnection(null);
-                return new[] { c };
+                // It should only await for the creation of the connection in few selected occasions:
+                // It's the first time accessing or it has been recently set as UP
+                // CreateOpenConnection() supports concurrent calls
+                c = await CreateOpenConnection(true).ConfigureAwait(false);
             }
             catch (Exception)
             {
                 OnConnectionClosing();
                 throw;
             }
+            StartCreatingConnection(null);
+            return new[] { c };
         }
 
         public void SetDistance(HostDistance distance)

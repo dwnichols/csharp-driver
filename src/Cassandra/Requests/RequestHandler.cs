@@ -282,10 +282,10 @@ namespace Cassandra.Requests
                 var hostPool = session.GetOrCreateConnectionPool(host, distance);
                 try
                 {
-                    var c = await hostPool.BorrowConnection();
+                    var c = await hostPool.BorrowConnection().ConfigureAwait(false);
                     if (c != null)
                     {
-                        await c.SetKeyspace(_session.Keyspace);
+                        await c.SetKeyspace(_session.Keyspace).ConfigureAwait(false);
                         return c;
                     }
                 }

@@ -123,7 +123,7 @@ namespace Cassandra.Tests
         }
 
         [Test]
-        public void EnsureCreate_Should_Yield_A_Connection_If_Any_Fails()
+        public async Task EnsureCreate_Should_Yield_A_Connection_If_Any_Fails()
         {
             var mock = GetPoolMock();
             var counter = 0;
@@ -138,9 +138,8 @@ namespace Cassandra.Tests
                 return TaskHelper.ToTask(CreateConnection());
             });
             var pool = mock.Object;
-            var creation = pool.EnsureCreate();
-            creation.Wait();
-            Assert.AreEqual(creation.Result.Length, 1);
+            var connections = await pool.EnsureCreate();
+            Assert.AreEqual(connections.Length, 1);
         }
 
         [Test]
@@ -195,6 +194,43 @@ namespace Cassandra.Tests
                 Assert.AreEqual(1, TaskHelper.WaitToComplete(t).Length);
             }
             Assert.AreEqual(1, lastByte);
+        }
+
+        [Test]
+        public void EnsureCreate_Parallel_Calls_Failing_Should_Only_Attempt_Creation_Once()
+        {
+            // Use a reconnection policy that never attempts
+            var mock = GetPoolMock(null, GetConfig(3, 3, new ConstantReconnectionPolicy(int.MaxValue)));
+            var openConnectionAttempts = 0;
+            mock.Setup(p => p.DoCreateAndOpen()).Returns(() =>
+            {
+                Interlocked.Increment(ref openConnectionAttempts);
+                return TaskHelper.FromException<Connection>(new Exception("Test Exception"));
+            });
+            var pool = mock.Object;
+            const int times = 5;
+            var creationTasks = new Task[times];
+            var counter = -1;
+            var initialCreate = pool.EnsureCreate();
+            TestHelper.ParallelInvoke(() =>
+            {
+                creationTasks[Interlocked.Increment(ref counter)] = pool.EnsureCreate();
+            }, times);
+
+            var aggregateException = Assert.Throws<AggregateException>(() => Task.WaitAll(creationTasks));
+            Assert.AreEqual(times, aggregateException.InnerExceptions.Count);
+            Assert.AreEqual(1, Volatile.Read(ref openConnectionAttempts));
+
+            // Serially, attempt calls to create
+            Interlocked.Exchange(ref counter, -1);
+            TestHelper.ParallelInvoke(() =>
+            {
+                creationTasks[Interlocked.Increment(ref counter)] = pool.EnsureCreate();
+            }, times);
+
+            aggregateException = Assert.Throws<AggregateException>(() => Task.WaitAll(creationTasks));
+            Assert.AreEqual(times, aggregateException.InnerExceptions.Count);
+            Assert.AreEqual(1, Volatile.Read(ref openConnectionAttempts));
         }
 
         [Test]
@@ -550,7 +586,7 @@ namespace Cassandra.Tests
         }
 
         [Test]
-        public async Task Pool_Increasing_Size_And_Closing_Should_Not_Leave_Connections_Open([Range(0, 30)] int delay)
+        public async Task Pool_Increasing_Size_And_Closing_Should_Not_Leave_Connections_Open([Range(0, 29)] int delay)
         {
             var mock = GetPoolMock(null, GetConfig(50, 50));
             mock.Setup(p => p.DoCreateAndOpen()).Returns(() =>
@@ -562,7 +598,6 @@ namespace Cassandra.Tests
             Assert.Greater(pool.OpenConnections, 0);
             // Wait for the pool to be gaining size
             await Task.Delay(delay);
-            Trace.TraceInformation("!!!!!!!!!!!!!!!!!!!!!!!!!!Length {0}", pool.OpenConnections);
             Assert.Greater(pool.OpenConnections, 1);
             pool.Dispose();
             await Task.Delay(20);
@@ -586,49 +621,25 @@ namespace Cassandra.Tests
             Assert.AreEqual(0, Volatile.Read(ref eventRaised));
         }
 
-
-        //        [Test]
-        //        public void AttemptReconnection_Should_Not_Create_A_New_Connection_If_There_Is_An_Open_Connection()
-        //        {
-        //            var mock = GetPoolMock();
-        //            mock.Setup(p => p.CreateConnection()).Returns(() => TaskHelper.ToTask(CreateConnection()));
-        //            var pool = mock.Object;
-        //            //Create 1 connection
-        //            TaskHelper.WaitToComplete(pool.MaybeCreateFirstConnection());
-        //            Thread.SpinWait(1);
-        //            Assert.AreEqual(1, pool.OpenConnections.Count());
-        //            pool.AttemptReconnection();
-        //            Thread.SpinWait(5);
-        //            //Pool remains the same
-        //            Assert.AreEqual(1, pool.OpenConnections.Count());
-        //        }
-        //
-        //        [Test]
-        //        public void AttemptReconnection_After_Dispose_Should_Not_Create_New_Connections()
-        //        {
-        //            var mock = GetPoolMock();
-        //            mock.Setup(p => p.CreateConnection()).Returns(() => TestHelper.DelayedTask(CreateConnection(), 20));
-        //            var pool = mock.Object;
-        //            Assert.AreEqual(0, pool.OpenConnections.Count());
-        //            pool.Dispose();
-        //            pool.AttemptReconnection();
-        //            Thread.Sleep(100);
-        //            Assert.AreEqual(0, pool.OpenConnections.Count());
-        //        }
-        //
-        //        [Test]
-        //        public void Dispose_Should_Cancel_Reconnection_Attempts()
-        //        {
-        //            var mock = GetPoolMock();
-        //            mock.Setup(p => p.CreateConnection()).Returns(() => TestHelper.DelayedTask(CreateConnection(), 200));
-        //            var pool = mock.Object;
-        //            Assert.AreEqual(0, pool.OpenConnections.Count());
-        //            pool.AttemptReconnection();
-        //            pool.Dispose();
-        //            Thread.Sleep(500);
-        //            Assert.AreEqual(0, pool.OpenConnections.Count());
-        //        }
-        //
+        [Test]
+        public async Task Dispose_Should_Cancel_Reconnection_Attempts()
+        {
+            var mock = GetPoolMock(null, GetConfig(4, 4, new ConstantReconnectionPolicy(200)));
+            var openConnectionAttempts = 0;
+            mock.Setup(p => p.DoCreateAndOpen()).Returns(() =>
+            {
+                Interlocked.Increment(ref openConnectionAttempts);
+                return TaskHelper.ToTask(CreateConnection());
+            });
+            var pool = mock.Object;
+            Assert.AreEqual(0, pool.OpenConnections);
+            pool.SetDistance(HostDistance.Local);
+            pool.ScheduleReconnection();
+            pool.Dispose();
+            await Task.Delay(400);
+            Assert.AreEqual(0, Volatile.Read(ref openConnectionAttempts));
+            Assert.AreEqual(0, pool.OpenConnections);
+        }
     }
 }
 #endif

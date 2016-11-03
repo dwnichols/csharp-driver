@@ -512,7 +512,8 @@ namespace Cassandra
                 return await FinishOpen(tcs, null, connectionsSnapshot[0]).ConfigureAwait(false);
             }
             Logger.Info("Creating a new connection to {0}", _host.Address);
-            Connection c;
+            Connection c = null;
+            Exception creationEx = null;
             try
             {
                 c = await DoCreateAndOpen().ConfigureAwait(false);
@@ -520,9 +521,12 @@ namespace Cassandra
             catch (Exception ex)
             {
                 Logger.Info("Connection to {0} could not be created: {1}", _host.Address, ex);
-                // Can not await on catch on C# 5..
-                FinishOpen(tcs, ex).ConfigureAwait(false);
-                throw;
+                // Can not await on catch on C# 5...
+                creationEx = ex;
+            }
+            if (creationEx != null)
+            {
+                return await FinishOpen(tcs, creationEx).ConfigureAwait(false);
             }
             if (IsClosing)
             {

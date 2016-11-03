@@ -216,6 +216,7 @@ namespace Cassandra.Tests
             {
                 creationTasks[Interlocked.Increment(ref counter)] = pool.EnsureCreate();
             }, times);
+            Assert.Throws<AggregateException>(() => initialCreate.Wait());
 
             var aggregateException = Assert.Throws<AggregateException>(() => Task.WaitAll(creationTasks));
             Assert.AreEqual(times, aggregateException.InnerExceptions.Count);
@@ -598,7 +599,10 @@ namespace Cassandra.Tests
             Assert.Greater(pool.OpenConnections, 0);
             // Wait for the pool to be gaining size
             await Task.Delay(delay);
-            Assert.Greater(pool.OpenConnections, 1);
+            if (delay > 20)
+            {
+                Assert.Greater(pool.OpenConnections, 1);
+            }
             pool.Dispose();
             await Task.Delay(20);
             Assert.AreEqual(0, pool.OpenConnections);

@@ -107,6 +107,7 @@ namespace Cassandra
             _host.Down += OnHostDown;
             _host.Up += OnHostUp;
             _host.Remove += OnHostRemoved;
+            _host.DistanceChanged += OnDistanceChanged;
             _config = config;
             _serializer = serializer;
             _timer = config.Timer;
@@ -137,6 +138,11 @@ namespace Cassandra
             {
                 // Clear previous reconnection attempt timeout
                 previousTimeout.Cancel();
+            }
+            if (newTimeout != null && IsClosing)
+            {
+                // It could have been the case the it was set after it was set as closed.
+                Interlocked.Exchange(ref _newConnectionTimeout, null);
             }
         }
 
@@ -177,6 +183,10 @@ namespace Cassandra
                 // There is already another thread resizing the pool
                 return;
             }
+            if (IsClosing)
+            {
+                return;
+            }
             _expectedConnectionLength++;
             Logger.Info("Increasing pool #{0} size to {1}, as in-flight requests are above threshold ({2})", 
                 GetHashCode(), _expectedConnectionLength, _maxInflightThreshold);
@@ -208,6 +218,7 @@ namespace Cassandra
             _host.Up -= OnHostUp;
             _host.Down -= OnHostDown;
             _host.Remove -= OnHostRemoved;
+            _host.DistanceChanged -= OnDistanceChanged;
             var t = _resizingEndTimeout;
             if (t != null)
             {
@@ -325,10 +336,91 @@ namespace Cassandra
             SetNewConnectionTimeout(_reconnectionSchedule);
         }
 
+        private void OnDistanceChanged(HostDistance previousDistance, HostDistance distance)
+        {
+            SetDistance(distance);
+            if (previousDistance == HostDistance.Ignored)
+            {
+                _canCreateForeground = true;
+                // Start immediate reconnection
+                ScheduleReconnection(true);
+                return;
+            }
+            if (distance != HostDistance.Ignored)
+            {
+                return;
+            }
+            // Host is now ignored
+            var isClosing = Interlocked.CompareExchange(ref _state, PoolState.Closing, PoolState.Init) == 
+                PoolState.Init;
+            if (!isClosing)
+            {
+                // Is already shutting down or shutdown, don't mind
+                return;
+            }
+            DrainConnections(() =>
+            {
+                // After draining, set the pool back to init state
+                Interlocked.CompareExchange(ref _state, PoolState.Init, PoolState.Closing);
+            });
+            CancelNewConnectionTimeout();
+        }
+
         private void OnHostRemoved()
         {
-            //TODO: Drain and shutdown
-            throw new NotImplementedException();
+            var previousState = Interlocked.Exchange(ref _state, PoolState.ShuttingDown);
+            if (previousState == PoolState.Shutdown)
+            {
+                // It was already shutdown
+                Interlocked.Exchange(ref _state, PoolState.Shutdown);
+                return;
+            }
+            Logger.Info("Host decommissioned. Closing pool #{0} to {1}", GetHashCode(), _host.Address);
+
+            DrainConnections(() => Interlocked.Exchange(ref _state, PoolState.Shutdown));
+
+            CancelNewConnectionTimeout();
+            var t = _resizingEndTimeout;
+            if (t != null)
+            {
+                t.Cancel();
+            }
+        }
+        
+        /// <summary>
+        /// Removes the connections from the pool and defers the closing of the connections until twice the
+        /// readTimeout. The connection might be already selected and sending requests.
+        /// </summary>
+        private void DrainConnections(Action afterDrainHandler)
+        {
+            var connections = _connections.ClearAndGet();
+            if (connections.Length == 0)
+            {
+                Logger.Info("Pool #{0} to {1} had no connections", GetHashCode(), _host.Address);
+                return;
+            }
+            // The request handler might execute up to 2 queries with a single connection:
+            // Changing the keyspace + the actual query
+            var delay = _config.SocketOptions.ReadTimeoutMillis*2;
+            // Use a sane maximum of 5 mins
+            const int maxDelay = 5*60*1000;
+            if (delay <= 0 || delay > maxDelay)
+            {
+                delay = maxDelay;
+            }
+            _timer.NewTimeout(_ =>
+            {
+                Logger.Info("Pool #{0} closing {1} connections to {2} after {3}ms", 
+                    GetHashCode(), connections.Length, delay);
+                foreach (var c in connections)
+                {
+                    c.Dispose();
+                }
+                if (afterDrainHandler != null)
+                {
+                    afterDrainHandler();
+                }
+            }, null, delay);
         }
 
         public void OnHostUp(Host h)
@@ -364,21 +456,6 @@ namespace Cassandra
         }
 
         /// <summary>
-        /// Sets the state of the pool to Closing
-        /// </summary>
-        public void StartClosing()
-        {
-            //TODO
-            var isClosing = Interlocked.CompareExchange(ref _state, PoolState.Closing, PoolState.Init) == PoolState.Init;
-            if (!isClosing)
-            {
-                // It was in another state, don't mind
-                return;
-            }
-            CancelNewConnectionTimeout();
-        }
-
-        /// <summary>
         /// Adds a new reconnection timeout using a new schedule.
         /// Resets the status of the pool to allow further reconnections.
         /// </summary>
@@ -408,6 +485,7 @@ namespace Cassandra
             if (schedule == null)
             {
                 // Start creating immediately after de-scheduling the timer
+                Logger.Info("Starting reconnection from pool #{0} to {1}", GetHashCode(), _host.Address);
                 StartCreatingConnection(null);
             }
         }
@@ -552,6 +630,7 @@ namespace Cassandra
 
         private Task<Connection> FinishOpen(TaskCompletionSource<Connection> tcs, Exception ex, Connection c = null)
         {
+            // Instruction ordering: canCreateForeground flag must be set before resetting of the tcs
             _canCreateForeground = false;
             Interlocked.Exchange(ref _connectionOpenTcs, null);
             if (ex != null)

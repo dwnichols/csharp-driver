@@ -22,18 +22,13 @@ using System.Threading;
 namespace Cassandra
 {
     /// <summary>
-    ///  A Cassandra node. This class keeps the information the driver maintains on a given Cassandra node.
+    /// Represents a Cassandra node.
     /// </summary>
     public class Host
     {
         private static readonly Logger Logger = new Logger(typeof(Host));
         private long _isUpNow = 1;
-        /// <summary>
-        /// Used as a flag to limit the amount of connection pools attempting reconnection to 1.
-        /// </summary>
-        private long _nextUpTime;
-
-        private int _distance;
+        private int _distance = (int) HostDistance.Ignored;
 
         /// <summary>
         /// Event that gets raised when the host is set as DOWN (not available) by the driver, after being UP.
@@ -54,7 +49,7 @@ namespace Cassandra
         /// <summary>
         /// Event that gets raised when there is a change in the distance, perceived by the host.
         /// </summary>
-        internal event Action<HostDistance> DistanceChanged;
+        internal event Action<HostDistance, HostDistance> DistanceChanged;
 
         /// <summary>
         /// Determines if the host is UP for the driver
@@ -69,7 +64,7 @@ namespace Cassandra
         /// </summary>
         public bool IsConsiderablyUp
         {
-            get { return Interlocked.Read(ref _isUpNow) == 1L || _nextUpTime <= DateTimeOffset.Now.Ticks; }
+            get { return IsUp; }
         }
 
         /// <summary>
@@ -161,7 +156,6 @@ namespace Cassandra
         {
             Logger.Info("Decommissioning node {0}", Address);
             Interlocked.Exchange(ref _isUpNow, 0);
-            Interlocked.Exchange(ref _nextUpTime, long.MaxValue);
             if (Remove != null)
             {
                 Remove();
@@ -187,10 +181,10 @@ namespace Cassandra
         /// </summary>
         internal void SetDistance(HostDistance distance)
         {
-            var changed = Interlocked.Exchange(ref _distance, (int)distance) != (int)distance;
-            if (changed && DistanceChanged != null)
+            var previousDistance = (HostDistance) Interlocked.Exchange(ref _distance, (int)distance);
+            if (previousDistance != distance && DistanceChanged != null)
             {
-                DistanceChanged(distance);
+                DistanceChanged(previousDistance, distance);
             }
         }
     }

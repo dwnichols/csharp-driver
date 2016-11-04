@@ -67,8 +67,7 @@ namespace Cassandra
         /// </summary>
         private volatile byte[] _minimalBuffer;
         private volatile string _keyspace;
-        private readonly SemaphoreSlim _keyspaceSwitchSemaphore = new SemaphoreSlim(1);
-        private volatile Task<bool> _keyspaceSwitchTask;
+        private TaskCompletionSource<bool> _keyspaceSwitchTcs;
         private volatile byte _frameHeaderSize;
         private MemoryStream _readStream;
         private int _writeState = WriteStateInit;
@@ -337,7 +336,6 @@ namespace Cassandra
             }
             _idleTimer.Dispose();
             _tcpSocket.Dispose();
-            _keyspaceSwitchSemaphore.Dispose();
             var readStream = Interlocked.Exchange(ref _readStream, null);
             if (readStream != null)
             {
@@ -846,73 +844,49 @@ namespace Cassandra
         /// Sets the keyspace of the connection.
         /// If the keyspace is different from the current value, it sends a Query request to change it
         /// </summary>
-        public Task<bool> SetKeyspace(string value)
+        public async Task<bool> SetKeyspace(string value)
         {
-            if (String.IsNullOrEmpty(value) || _keyspace == value)
+            if (string.IsNullOrEmpty(value))
             {
-                //No need to switch
-                return TaskHelper.Completed;
-            }
-            Task<bool> keyspaceSwitch;
-            try
-            {
-                if (!_keyspaceSwitchSemaphore.Wait(0))
-                {
-                    //Could not enter semaphore
-                    //It is very likely that the connection is already switching keyspace
-                    keyspaceSwitch = _keyspaceSwitchTask;
-                    if (keyspaceSwitch != null)
-                    {
-                        return keyspaceSwitch.Then(_ =>
-                        {
-                            //validate if the new keyspace is the expected
-                            if (_keyspace != value)
-                            {
-                                //multiple concurrent switches to different keyspace
-                                return SetKeyspace(value);
-                            }
-                            return TaskHelper.Completed;
-                        });
-                    }
-                    _keyspaceSwitchSemaphore.Wait();
-                }
-            }
-            catch (ObjectDisposedException)
-            {
-                //The semaphore was disposed, this connection is closed
-                return TaskHelper.FromException<bool>(new SocketException((int) SocketError.NotConnected));
-            }
-            //Semaphore entered
-            if (_keyspace == value)
-            {
-                //While waiting to enter the semaphore, the connection switched keyspace
-                try
-                {
-                    _keyspaceSwitchSemaphore.Release();
-                }
-                catch (ObjectDisposedException)
-                {
-                    //this connection is now closed but the switch completed successfully
-                }
-                return TaskHelper.Completed;
-            }
-            var request = new QueryRequest(_serializer.ProtocolVersion, string.Format("USE \"{0}\"", value), false, QueryProtocolOptions.Default);
-            Logger.Info("Connection to host {0} switching to keyspace {1}", Address, value);
-            keyspaceSwitch = _keyspaceSwitchTask = Send(request).ContinueSync(r =>
-            {
-                _keyspace = value;
-                try
-                {
-                    _keyspaceSwitchSemaphore.Release();
-                }
-                catch (ObjectDisposedException)
-                {
-                    //this connection is now closed but the switch completed successfully
-                }
-                _keyspaceSwitchTask = null;
                 return true;
-            });
-            return keyspaceSwitch;
+            }
+            while (_keyspace != value)
+            {
+                var switchTcs = Volatile.Read(ref _keyspaceSwitchTcs);
+                if (switchTcs != null)
+                {
+                    // Is already switching
+                    await switchTcs.Task.ConfigureAwait(false);
+                    continue;
+                }
+                var tcs = new TaskCompletionSource<bool>();
+                switchTcs = Interlocked.CompareExchange(ref _keyspaceSwitchTcs, tcs, null);
+                if (switchTcs != null)
+                {
+                    // Is already switching
+                    await switchTcs.Task.ConfigureAwait(false);
+                    continue;
+                }
+                // CAS operation won, this is the only thread changing the keyspace
+                Logger.Info("Connection to host {0} switching to keyspace {1}", Address, value);
+                var request = new QueryRequest(_serializer.ProtocolVersion, string.Format("USE \"{0}\"", value), false, QueryProtocolOptions.Default);
+                Exception sendException = null;
+                try
+                {
+                    await Send(request).ConfigureAwait(false);
+                    _keyspace = value;
+                }
+                catch (Exception ex)
+                {
+                    sendException = ex;
+                }
+
+                // Set the reference to null before setting the result
+                Interlocked.Exchange(ref _keyspaceSwitchTcs, null);
+                tcs.TrySet(sendException, true);
+                return await tcs.Task.ConfigureAwait(false);
+            }
+            return true;
         }
 
         private void OnTimeout(object stateObj)

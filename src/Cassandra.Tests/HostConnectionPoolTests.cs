@@ -27,7 +27,6 @@ namespace Cassandra.Tests
         public void OnTimeSetUp()
         {
             Diagnostics.CassandraTraceSwitch.Level = TraceLevel.Info;
-            Trace.Listeners.Add(new ConsoleTraceListener());
         }
 
         [OneTimeTearDown]

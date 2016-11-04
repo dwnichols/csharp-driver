@@ -411,7 +411,7 @@ namespace Cassandra
             _timer.NewTimeout(_ =>
             {
                 Logger.Info("Pool #{0} closing {1} connections to {2} after {3}ms", 
-                    GetHashCode(), connections.Length, delay);
+                    GetHashCode(), connections.Length, _host.Address, delay);
                 foreach (var c in connections)
                 {
                     c.Dispose();

@@ -410,16 +410,19 @@ namespace Cassandra
             }
             _timer.NewTimeout(_ =>
             {
-                Logger.Info("Pool #{0} closing {1} connections to {2} after {3}ms", 
-                    GetHashCode(), connections.Length, _host.Address, delay);
-                foreach (var c in connections)
+                Task.Run(() =>
                 {
-                    c.Dispose();
-                }
-                if (afterDrainHandler != null)
-                {
-                    afterDrainHandler();
-                }
+                    Logger.Info("Pool #{0} closing {1} connections to {2} after {3}ms",
+                        GetHashCode(), connections.Length, _host.Address, delay);
+                    foreach (var c in connections)
+                    {
+                        c.Dispose();
+                    }
+                    if (afterDrainHandler != null)
+                    {
+                        afterDrainHandler();
+                    }
+                });
             }, null, delay);
         }
 
@@ -479,7 +482,7 @@ namespace Cassandra
                 // Schedule the creation
                 var delay = schedule.NextDelayMs();
                 Logger.Info("Scheduling reconnection to {0} in {1}ms", _host.Address, delay);
-                timeout = _timer.NewTimeout(_ => StartCreatingConnection(schedule), null, delay);
+                timeout = _timer.NewTimeout(_ => Task.Run(() => StartCreatingConnection(schedule)), null, delay);
             }
             CancelNewConnectionTimeout(timeout);
             if (schedule == null)

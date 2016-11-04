@@ -371,12 +371,16 @@ namespace Cassandra.Requests
             //There is one live timer at a time.
             _nextExecutionTimeout = _session.Cluster.Configuration.Timer.NewTimeout(_ =>
             {
-                if (HasCompleted())
+                // Start the speculative execution outside the IO thread
+                Task.Run(() =>
                 {
-                    return;
-                }
-                Logger.Info("Starting new speculative execution after {0}, last used host {1}", delay, _host.Address);
-                StartNewExecution();
+                    if (HasCompleted())
+                    {
+                        return;
+                    }
+                    Logger.Info("Starting new speculative execution after {0}, last used host {1}", delay, _host.Address);
+                    StartNewExecution();
+                });
             }, null, delay);
         }
     }

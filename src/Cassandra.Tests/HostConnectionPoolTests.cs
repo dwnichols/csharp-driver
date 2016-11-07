@@ -281,6 +281,26 @@ namespace Cassandra.Tests
         }
 
         [Test]
+        public void OnHostUp_Does_Not_Recreates_Pool_For_Ignored_Hosts()
+        {
+            var mock = GetPoolMock(null, GetConfig(2, 2));
+            var creationCounter = 0;
+            mock.Setup(p => p.DoCreateAndOpen()).Returns(() =>
+            {
+                Interlocked.Increment(ref creationCounter);
+                return TaskHelper.ToTask(CreateConnection());
+            });
+            var pool = mock.Object;
+            pool.SetDistance(HostDistance.Ignored);
+            Assert.AreEqual(0, pool.OpenConnections);
+            Assert.AreEqual(0, Volatile.Read(ref creationCounter));
+            pool.OnHostUp(null);
+            Thread.Sleep(200);
+            Assert.AreEqual(0, pool.OpenConnections);
+            Assert.AreEqual(0, Volatile.Read(ref creationCounter));
+        }
+
+        [Test]
         public async Task EnsureCreate_After_Reconnection_Attempt_Waits_Existing()
         {
             var mock = GetPoolMock(null, GetConfig(2, 2));

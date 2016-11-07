@@ -341,23 +341,29 @@ namespace Cassandra.IntegrationTests.Core
         /// Checks that having a disposed Session created by the cluster does not affects other sessions
         /// </summary>
         [Test]
-        public void Session_Disposed_On_Cluster()
+        public async Task Session_Disposed_On_Cluster()
         {
             var cluster = Cluster.Builder().AddContactPoint(TestCluster.InitialContactPoint).Build();
             var session1 = cluster.Connect();
             var session2 = cluster.Connect();
-            TestHelper.ParallelInvoke(() => session1.Execute("SELECT * from system.local"), 5);
-            TestHelper.ParallelInvoke(() => session2.Execute("SELECT * from system.local"), 5);
-            //Dispose the first session
-            Trace.TraceInformation("Dispose the first session");
+            var isDown = 0;
+            foreach (var host in cluster.AllHosts())
+            {
+                host.Down += _ => Interlocked.Increment(ref isDown);
+            }
+            const string query = "SELECT * from system.local";
+            await TestHelper.TimesLimit(() => session1.ExecuteAsync(new SimpleStatement(query)), 100, 32);
+            await TestHelper.TimesLimit(() => session2.ExecuteAsync(new SimpleStatement(query)), 100, 32);
+            // Dispose the first session
             session1.Dispose();
 
-            //All nodes should be up
+            // All nodes should be up
             Assert.AreEqual(cluster.AllHosts().Count, cluster.AllHosts().Count(h => h.IsUp));
-            //And session2 should be queryable
-            TestHelper.ParallelInvoke(() => session2.Execute("SELECT * from system.local"), 5);
-            Trace.TraceInformation("Disposing cluster");
+            // And session2 should be queryable
+            await TestHelper.TimesLimit(() => session2.ExecuteAsync(new SimpleStatement(query)), 100, 32);
+            Assert.AreEqual(cluster.AllHosts().Count, cluster.AllHosts().Count(h => h.IsUp));
             cluster.Dispose();
+            Assert.AreEqual(0, Volatile.Read(ref isDown));
         }
 
 #if !NETCORE

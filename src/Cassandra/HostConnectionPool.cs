@@ -1,5 +1,5 @@
 //
-//      Copyright (C) 2012-2014 DataStax Inc.
+//      Copyright (C) 2012-2016 DataStax Inc.
 //
 //   Licensed under the Apache License, Version 2.0 (the "License");
 //   you may not use this file except in compliance with the License.
@@ -43,7 +43,6 @@ namespace Cassandra
         ///  - From Init to ShuttingDown: The pool is being shutdown as a result of a client shutdown.
         ///  - From Closing to Init: The pool finished closing connections (is now ignored) and it resets to
         ///    initial state in case the host is marked as local/remote in the future.
-        ///    // ^ TODO, how to control it? Host.Up event?
         ///  - From Closing to ShuttingDown (rare): It was marked as ignored, now the client is being shutdown.
         ///  - From ShuttingDown to Shutdown: Finished shutting down, the pool should not be reused.
         /// </summary>
@@ -124,7 +123,7 @@ namespace Cassandra
             var connections = await EnsureCreate().ConfigureAwait(false);
             if (connections.Length == 0)
             {
-                return null;
+                throw new DriverInternalError("No connection could be borrowed");
             }
             var c = MinInFlight(connections, ref _connectionIndex, _maxInflightThreshold);
             ConsiderResizingPool(c.InFlight);
@@ -408,12 +407,25 @@ namespace Cassandra
             {
                 delay = maxDelay;
             }
+            DrainConnectionsTimer(connections, afterDrainHandler, delay/1000);
+        }
+
+        private void DrainConnectionsTimer(Connection[] connections, Action afterDrainHandler, int steps)
+        {
             _timer.NewTimeout(_ =>
             {
                 Task.Run(() =>
                 {
-                    Logger.Info("Pool #{0} closing {1} connections to {2} after {3}ms",
-                        GetHashCode(), connections.Length, _host.Address, delay);
+                    var drained = !connections.Any(c => c.HasPendingOperations);
+                    if (!drained && --steps >= 0)
+                    {
+                        Logger.Info("Pool #{0} to {1} can not be closed yet",
+                            GetHashCode(), _host.Address);
+                        DrainConnectionsTimer(connections, afterDrainHandler, steps);
+                        return;
+                    }
+                    Logger.Info("Pool #{0} to {1} closing {2} connections to after {3} draining",
+                        GetHashCode(), _host.Address, connections.Length, drained ? "successful" : "unsuccessful");
                     foreach (var c in connections)
                     {
                         c.Dispose();
@@ -423,7 +435,7 @@ namespace Cassandra
                         afterDrainHandler();
                     }
                 });
-            }, null, delay);
+            }, null, 1000);
         }
 
         public void OnHostUp(Host h)
@@ -565,7 +577,7 @@ namespace Cassandra
             }
             if (IsClosing)
             {
-                return await FinishOpen(tcs, GetNotConnectedException()).ConfigureAwait(false);
+                return await FinishOpen(tcs, false, GetNotConnectedException()).ConfigureAwait(false);
             }
             // Before creating, make sure that its still needed
             // This method is the only one that adds new connections
@@ -576,9 +588,9 @@ namespace Cassandra
                 if (connectionsSnapshot.Length == 0)
                 {
                     // Avoid race condition while removing
-                    return await FinishOpen(tcs, GetNotConnectedException()).ConfigureAwait(false);
+                    return await FinishOpen(tcs, false, GetNotConnectedException()).ConfigureAwait(false);
                 }
-                return await FinishOpen(tcs, null, connectionsSnapshot[0]).ConfigureAwait(false);
+                return await FinishOpen(tcs, true, null, connectionsSnapshot[0]).ConfigureAwait(false);
             }
             if (foreground && !_canCreateForeground)
             {
@@ -588,9 +600,9 @@ namespace Cassandra
                 if (connectionsSnapshot.Length == 0)
                 {
                     // When creating in foreground, it failed
-                    return await FinishOpen(tcs, GetNotConnectedException()).ConfigureAwait(false);
+                    return await FinishOpen(tcs, false, GetNotConnectedException()).ConfigureAwait(false);
                 }
-                return await FinishOpen(tcs, null, connectionsSnapshot[0]).ConfigureAwait(false);
+                return await FinishOpen(tcs, false, null, connectionsSnapshot[0]).ConfigureAwait(false);
             }
             Logger.Info("Creating a new connection to {0}", _host.Address);
             Connection c = null;
@@ -607,13 +619,13 @@ namespace Cassandra
             }
             if (creationEx != null)
             {
-                return await FinishOpen(tcs, creationEx).ConfigureAwait(false);
+                return await FinishOpen(tcs, true, creationEx).ConfigureAwait(false);
             }
             if (IsClosing)
             {
                 Logger.Info("Connection to {0} opened successfully but pool #{1} was being closed", _host.Address);
                 c.Dispose();
-                return await FinishOpen(tcs, GetNotConnectedException()).ConfigureAwait(false);
+                return await FinishOpen(tcs, false, GetNotConnectedException()).ConfigureAwait(false);
             }
             var newLength = _connections.AddNew(c);
             Logger.Info("Connection to {0} opened successfully, pool #{1} length: {2}", 
@@ -626,24 +638,24 @@ namespace Cassandra
                     _host.Address);
                 _connections.Remove(c);
                 c.Dispose();
-                return await FinishOpen(tcs, GetNotConnectedException()).ConfigureAwait(false);
+                return await FinishOpen(tcs, false, GetNotConnectedException()).ConfigureAwait(false);
             }
-            return await FinishOpen(tcs, null, c).ConfigureAwait(false);
+            return await FinishOpen(tcs, true, null, c).ConfigureAwait(false);
         }
 
-        private Task<Connection> FinishOpen(TaskCompletionSource<Connection> tcs, Exception ex, Connection c = null)
+        private Task<Connection> FinishOpen(
+            TaskCompletionSource<Connection> tcs,
+            bool preventForeground, 
+            Exception ex, 
+            Connection c = null)
         {
             // Instruction ordering: canCreateForeground flag must be set before resetting of the tcs
-            _canCreateForeground = false;
+            if (preventForeground)
+            {
+                _canCreateForeground = false;
+            }
             Interlocked.Exchange(ref _connectionOpenTcs, null);
-            if (ex != null)
-            {
-                tcs.TrySetException(ex);
-            }
-            else
-            {
-                tcs.TrySetResult(c);
-            }
+            tcs.TrySet(ex, c);
             return tcs.Task;
         }
 

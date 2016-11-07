@@ -1,5 +1,5 @@
 ﻿//
-//      Copyright (C) 2012-2014 DataStax Inc.
+//      Copyright (C) 2012-2016 DataStax Inc.
 //
 //   Licensed under the Apache License, Version 2.0 (the "License");
 //   you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Threading;
+using System.Threading.Tasks;
 using Cassandra.Collections;
 using Cassandra.Serialization;
 using Cassandra.Tasks;
@@ -293,10 +294,23 @@ namespace Cassandra
                 return;
             }
             var sessions = _connectedSessions.ClearAndGet();
-            foreach (var s in sessions)
+            try
             {
-                s.WaitForAllPendingActions(timeoutMs);
-                s.Dispose();
+                Task.Run(() =>
+                {
+                    foreach (var s in sessions)
+                    {
+                        s.Dispose();
+                    }
+                }).Wait(timeoutMs);
+            }
+            catch (AggregateException ex)
+            {
+                if (ex.InnerExceptions.Count == 1)
+                {
+                    throw ex.InnerExceptions[0];
+                }
+                throw;
             }
             _metadata.ShutDown(timeoutMs);
             _controlConnection.Dispose();

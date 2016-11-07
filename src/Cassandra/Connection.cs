@@ -51,7 +51,6 @@ namespace Cassandra
         /// </summary>
         private volatile bool _isCanceled;
         private readonly Timer _idleTimer;
-        private AutoResetEvent _pendingWaitHandle;
         private long _timedOutOperations;
         /// <summary>
         /// Stores the available stream ids.
@@ -104,6 +103,14 @@ namespace Cassandra
         public virtual int InFlight
         { 
             get { return (int)Interlocked.Read(ref _inFlight); }
+        }
+
+        /// <summary>
+        /// Determines if there isn't any operations pending to be written or inflight.
+        /// </summary>
+        public virtual bool HasPendingOperations
+        {
+            get { return InFlight > 0 || !_writeQueue.IsEmpty; }
         }
 
         /// <summary>
@@ -321,10 +328,6 @@ namespace Cassandra
             Interlocked.MemoryBarrier();
             OperationState.CallbackMultiple(ops, ex);
             Interlocked.Exchange(ref _inFlight, 0);
-            if (_pendingWaitHandle != null)
-            {
-                _pendingWaitHandle.Set();
-            }
         }
 
         public virtual void Dispose()
@@ -494,10 +497,6 @@ namespace Cassandra
             if (!streamIdAvailable)
             {
                 return;
-            }
-            if (_pendingWaitHandle != null && _pendingOperations.IsEmpty && _writeQueue.IsEmpty)
-            {
-                _pendingWaitHandle.Set();
             }
             //Process a next item in the queue if possible.
             //Maybe there are there items in the write queue that were waiting on a fresh streamId
@@ -941,19 +940,6 @@ namespace Cassandra
             //Send the next request, if exists
             //It will use a new thread
             RunWriteQueue();
-        }
-
-        internal WaitHandle WaitPending()
-        {
-            if (_pendingWaitHandle == null)
-            {
-                _pendingWaitHandle = new AutoResetEvent(false);
-            }
-            if (_pendingOperations.IsEmpty && _writeQueue.IsEmpty)
-            {
-                _pendingWaitHandle.Set();
-            }
-            return _pendingWaitHandle;
         }
     }
 }

@@ -261,11 +261,14 @@ namespace Cassandra.Requests
             Host host;
             // Use the concrete implementation in this method
             var session = (Session) _session;
+            Connection c = null;
             // While there is an available host
             while ((host = GetNextHost()) != null && !session.IsDisposed)
             {
                 _host = host;
                 triedHosts[host.Address] = null;
+                // Retrieve the distance from the load balancing and setting it
+                // at host level
                 var distance = Cluster.RetrieveDistance(host, Policies.LoadBalancingPolicy);
                 if (distance == HostDistance.Ignored)
                 {
@@ -282,12 +285,7 @@ namespace Cassandra.Requests
                 var hostPool = session.GetOrCreateConnectionPool(host, distance);
                 try
                 {
-                    var c = await hostPool.BorrowConnection().ConfigureAwait(false);
-                    if (c != null)
-                    {
-                        await c.SetKeyspace(_session.Keyspace).ConfigureAwait(false);
-                        return c;
-                    }
+                    c = await hostPool.BorrowConnection().ConfigureAwait(false);
                 }
                 catch (UnsupportedProtocolVersionException ex)
                 {
@@ -305,8 +303,19 @@ namespace Cassandra.Requests
                     Logger.Error(ex);
                     triedHosts[host.Address] = ex;
                 }
+                if (c == null)
+                {
+                    continue;
+                }
+                await c.SetKeyspace(_session.Keyspace).ConfigureAwait(false);
+                break;
             }
-            throw new NoHostAvailableException(triedHosts);
+
+            if (c == null)
+            {
+                throw new NoHostAvailableException(triedHosts);
+            }
+            return c;
         }
 
         public Task<T> Send()

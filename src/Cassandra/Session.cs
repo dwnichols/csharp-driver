@@ -1,5 +1,5 @@
 //
-//      Copyright (C) 2012-2014 DataStax Inc.
+//      Copyright (C) 2012-2016 DataStax Inc.
 //
 //   Licensed under the Apache License, Version 2.0 (the "License");
 //   you may not use this file except in compliance with the License.
@@ -234,9 +234,9 @@ namespace Cassandra
             {
                 var newPool = new HostConnectionPool(host, Configuration, _serializer);
                 newPool.AllConnectionClosed += OnAllConnectionClosed;
+                newPool.SetDistance(distance);
                 return newPool;
             });
-            hostPool.SetDistance(distance);
             return hostPool;
         }
 
@@ -373,31 +373,6 @@ namespace Cassandra
         public bool WaitForSchemaAgreement(IPEndPoint hostAddress)
         {
             return false;
-        }
-
-        /// <summary>
-        /// Waits for all pending responses to be received on all open connections or until a timeout is reached
-        /// </summary>
-        internal bool WaitForAllPendingActions(int timeout)
-        {
-            if (timeout == Timeout.Infinite)
-            {
-                //It is generally invoked with timeout infinite
-                //Do not honor that setting as it is best to cancel pending requests than waiting forever
-                timeout = Configuration.ClientOptions.QueryAbortTimeout;
-            }
-            //TODO!
-            throw new NotImplementedException();
-//            var connections = GetAllConnections();
-//            if (connections.Count == 0)
-//            {
-//                return true;
-//            }
-//            Logger.Info("Waiting for pending operations of " + connections.Count + " connections to complete.");
-//            var handles = connections.Select(c => c.WaitPending()).ToArray();
-//            //WaitHandle.WaitAll() not supported on STAThreads (thanks COM!)
-//            //Start new task and wait on the individual Task
-//            return Task.Factory.StartNew(() => WaitHandle.WaitAll(handles, timeout)).Wait(timeout);
         }
     }
 }

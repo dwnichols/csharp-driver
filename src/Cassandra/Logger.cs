@@ -25,7 +25,6 @@ namespace Cassandra
     {
         private const string DateFormat = "MM/dd/yyyy H:mm:ss.fff zzz";
         private readonly string _category;
-        private StringBuilder _sb;
 
         public Logger(Type type)
         {
@@ -43,21 +42,6 @@ namespace Cassandra
             return sb.ToString();
         }
 
-        private string GetExceptionAndAllInnerEx(Exception ex, bool recur = false)
-        {
-            if (!recur || _sb == null)
-                _sb = new StringBuilder();
-            _sb.Append(String.Format("( Exception! Source {0} \n Message: {1} \n StackTrace:\n {2} ", ex.Source, ex.Message,
-                                    (Diagnostics.CassandraStackTraceIncluded
-                                         ? (recur ? ex.StackTrace : PrintStackTrace(ex))
-                                         : "To display StackTrace, change Debugging.StackTraceIncluded property value to true.")));
-            if (ex.InnerException != null)
-                GetExceptionAndAllInnerEx(ex.InnerException, true);
-
-            _sb.Append(")");
-            return _sb.ToString();
-        }
-
         public void Error(Exception ex)
         {
             if (!Diagnostics.CassandraTraceSwitch.TraceError)
@@ -69,7 +53,7 @@ namespace Cassandra
                 return;
             }
             Trace.WriteLine(
-                String.Format("{0} #ERROR: {1}", DateTimeOffset.Now.DateTime.ToString(DateFormat), GetExceptionAndAllInnerEx(ex)), _category);
+                String.Format("{0} #ERROR: {1}", DateTimeOffset.Now.DateTime.ToString(DateFormat), ex), _category);
         }
 
         public void Error(string msg, Exception ex = null)
@@ -80,7 +64,7 @@ namespace Cassandra
             }
             Trace.WriteLine(
                 String.Format("{0} #ERROR: {1}", DateTimeOffset.Now.DateTime.ToString(DateFormat),
-                    msg + (ex != null ? "\nEXCEPTION:\n " + GetExceptionAndAllInnerEx(ex) : String.Empty)), _category);
+                    msg + (ex != null ? "\nEXCEPTION:\n " + ex : string.Empty)), _category);
         }
 
         public void Error(string message, params object[] args)

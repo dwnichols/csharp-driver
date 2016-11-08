@@ -624,7 +624,8 @@ namespace Cassandra
             }
             if (IsClosing)
             {
-                Logger.Info("Connection to {0} opened successfully but pool #{1} was being closed", _host.Address);
+                Logger.Info("Connection to {0} opened successfully but pool #{1} was being closed", 
+                    _host.Address, GetHashCode());
                 c.Dispose();
                 return await FinishOpen(tcs, false, GetNotConnectedException()).ConfigureAwait(false);
             }
@@ -636,7 +637,7 @@ namespace Cassandra
                 // We haven't use a CAS operation, so it's possible that the pool is being closed while adding a new
                 // connection, we should remove it.
                 Logger.Info("Connection to {0} opened successfully and added to the pool #{1} but it was being closed",
-                    _host.Address);
+                    _host.Address, GetHashCode());
                 _connections.Remove(c);
                 c.Dispose();
                 return await FinishOpen(tcs, false, GetNotConnectedException()).ConfigureAwait(false);

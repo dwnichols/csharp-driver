@@ -295,6 +295,7 @@ namespace Cassandra
             var c = _connection;
             if (c != null)
             {
+                _logger.Info("Shutting down control connection to {0}", c.Address);
                 c.Dispose();
             }
             _reconnectionTimer.Change(Timeout.Infinite, Timeout.Infinite);

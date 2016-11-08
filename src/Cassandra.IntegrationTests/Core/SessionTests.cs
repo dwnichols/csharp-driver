@@ -263,7 +263,7 @@ namespace Cassandra.IntegrationTests.Core
             }
         }
 
-        [Test]
+        [Test, TestTimeout(5 * 60 * 1000), Repeat(10)]
         public async Task Session_With_Host_Changing_Distance()
         {
             var lbp = new DistanceChangingLbp();
@@ -286,13 +286,13 @@ namespace Cassandra.IntegrationTests.Core
                         lbp.SetRemoteHost(remoteHost);
                         stopWatch.Start();
                     }
-                    else if (count >= 240 && stopWatch.ElapsedMilliseconds > 1200)
+                    else if (count >= 240 && stopWatch.ElapsedMilliseconds > 1400)
                     {
                         lbp.SetRemoteHost(null);
                     }
                     return localSession.ExecuteAsync(new SimpleStatement("SELECT key FROM system.local"));
                 };
-                await TestHelper.TimesLimit(execute, 6000, 32);
+                await TestHelper.TimesLimit(execute, 12000, 32);
                 var hosts = localCluster.AllHosts().ToArray();
                 var pool1 = localSession.GetOrCreateConnectionPool(hosts[0], HostDistance.Local);
                 var pool2 = localSession.GetOrCreateConnectionPool(hosts[1], HostDistance.Local);

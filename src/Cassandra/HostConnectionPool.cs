@@ -357,6 +357,7 @@ namespace Cassandra
                 // Is already shutting down or shutdown, don't mind
                 return;
             }
+            Logger.Info("Host ignored. Closing pool #{0} to {1}", GetHashCode(), _host.Address);
             DrainConnections(() =>
             {
                 // After draining, set the pool back to init state

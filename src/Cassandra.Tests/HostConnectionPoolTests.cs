@@ -605,12 +605,17 @@ namespace Cassandra.Tests
             Assert.AreEqual(2, pool.OpenConnections);
         }
 
-        [Test]
+        [Test, Repeat(10)]
         public async Task Pool_Increasing_Size_And_Closing_Should_Not_Leave_Connections_Open([Range(0, 29)] int delay)
         {
             var mock = GetPoolMock(null, GetConfig(50, 50));
-            mock.Setup(p => p.DoCreateAndOpen()).Returns(() =>
-                Task.Factory.StartNew(() => CreateConnection(), TaskCreationOptions.LongRunning));
+            mock.Setup(p => p.DoCreateAndOpen()).Returns(async () =>
+            {
+                await Task.Yield();
+                var spinWait = new SpinWait();
+                spinWait.SpinOnce();
+                return await Task.Run(() => CreateConnection());
+            });
             var pool = mock.Object;
             Assert.AreEqual(0, pool.OpenConnections);
             pool.SetDistance(HostDistance.Local);
@@ -622,8 +627,11 @@ namespace Cassandra.Tests
             {
                 Assert.Greater(pool.OpenConnections, 1);
             }
-            pool.Dispose();
-            await Task.Delay(20);
+            await Task.Run(() =>
+            {
+                pool.Dispose();
+            });
+            await Task.Delay(100);
             Assert.AreEqual(0, pool.OpenConnections);
         }
 

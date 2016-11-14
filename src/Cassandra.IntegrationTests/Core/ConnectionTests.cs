@@ -511,15 +511,16 @@ namespace Cassandra.IntegrationTests.Core
         [Test]
         public async Task SetKeyspace_Parallel_Calls_With_Same_Name_Executes_Once()
         {
-            using (var connection = CreateConnection())
+            using (var connection = CreateConnection(null, null, new PoolingOptions().SetHeartBeatInterval(0)))
             {
                 await connection.Open();
                 Assert.Null(connection.Keyspace);
-                var counter = 0;
-                connection.WriteCompleted += () => Interlocked.Increment(ref counter);
                 var actions = new Action[100]
                     .Select<Action, Action>(_ => () => connection.SetKeyspace("system").Wait())
                     .ToArray();
+                await Task.Delay(100);
+                var counter = 0;
+                connection.WriteCompleted += () => Interlocked.Increment(ref counter);
                 TestHelper.ParallelInvoke(actions);
                 Assert.AreEqual("system", connection.Keyspace);
                 await Task.Delay(200);

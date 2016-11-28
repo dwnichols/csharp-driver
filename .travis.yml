@@ -21,6 +21,7 @@ branches:
 
 solution: src/Cassandra.sln
 install:
+  - ./scassandra_install.sh
   - nuget restore src/Cassandra.sln
   - nuget install NUnit.Runners -Version 3.4.1 -OutputDirectory testrunner
 script:

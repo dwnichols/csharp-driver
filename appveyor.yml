@@ -31,6 +31,7 @@ environment:
 
 install:
   - ps: .\appveyor_install.ps1
+  - ps: .\scassandra_install.ps1
 
 build:
   project: src/Cassandra.sln

@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -23,6 +24,7 @@ namespace Cassandra.IntegrationTests.Core
         public void OnTearDown()
         {
             TestClusterManager.TryRemove();
+            SCassandraManager.Stop();
         }
 
         [Test, TestTimeout(1000 * 60 * 4), TestCase(false), TestCase(true)]
@@ -115,5 +117,62 @@ namespace Cassandra.IntegrationTests.Core
             }
             return tcs.Task;
         }
+        
+        [Test]
+        public void MarkHostDown_PartialPoolConnection()
+        {
+            //start scassandra
+            SCassandraManager.Start();
+            SCassandraManager.SetupInitialConf().Wait();
+            const int connectionLength = 4;
+            var builder = Cluster.Builder()
+                                 .AddContactPoint("127.0.0.1")
+                                 .WithPort(8042)
+                                 .WithPoolingOptions(new PoolingOptions()
+                                     .SetCoreConnectionsPerHost(HostDistance.Local, connectionLength)
+                                     .SetMaxConnectionsPerHost(HostDistance.Local, connectionLength)
+                                     .SetHeartBeatInterval(0));
+            using (var cluster = builder.Build())
+            {
+                var session = (Session)cluster.Connect();
+                var allHosts = cluster.AllHosts();
+
+                TestHelper.WaitUntil(() =>
+                    allHosts.Sum(h => session
+                        .GetOrCreateConnectionPool(h, HostDistance.Local)
+                        .OpenConnections
+                    ) == allHosts.Count * connectionLength);
+                var h1 = allHosts.FirstOrDefault();
+                var pool = session.GetOrCreateConnectionPool(h1, HostDistance.Local);
+                SCassandraManager.DisableConnectionListener().Wait();
+
+                Assert.AreEqual(4, pool.OpenConnections);
+                Assert.IsTrue(h1.IsUp);
+                //remove one connection
+                var ports = SCassandraManager.GetListOfConnectedPorts().Result;
+                SCassandraManager.DropConnection(ports[ports.Length-1]).Wait();
+                //http://127.0.0.1:9043/current/connections/127.0.0.1/<connectionport>
+                Assert.AreEqual(3, pool.OpenConnections);
+                Assert.IsTrue(h1.IsUp);
+                //remove one connection
+                ports = SCassandraManager.GetListOfConnectedPorts().Result;
+                SCassandraManager.DropConnection(ports[ports.Length - 1]).Wait();
+                Assert.AreEqual(2, pool.OpenConnections);
+                Assert.IsTrue(h1.IsUp);
+                //remove one connection
+                ports = SCassandraManager.GetListOfConnectedPorts().Result;
+                SCassandraManager.DropConnection(ports[ports.Length - 1]).Wait();
+                Assert.AreEqual(1, pool.OpenConnections);
+                Assert.IsTrue(h1.IsUp);
+                //remove one connection
+                ports = SCassandraManager.GetListOfConnectedPorts().Result;
+                SCassandraManager.DropConnection(ports[ports.Length - 1]).Wait();
+                Assert.AreEqual(0, pool.OpenConnections);
+                Assert.IsFalse(h1.IsUp);
+            }
+            //close scassandra
+        }
+
+
     }
 }

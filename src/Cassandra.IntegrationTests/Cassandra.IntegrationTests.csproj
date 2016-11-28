@@ -167,6 +167,7 @@
     <Compile Include="TestBase\Options.cs" />
     <Compile Include="CommonFixtureSetup.cs" />
     <Compile Include="TestClusterManagement\ITestCluster.cs" />
+    <Compile Include="TestClusterManagement\SCassandraManager.cs" />
     <Compile Include="TestClusterManagement\TestClusterManager.cs" />
     <Compile Include="TestBase\TestGlobals.cs" />
     <Compile Include="TestBase\TestUtils.cs" />
